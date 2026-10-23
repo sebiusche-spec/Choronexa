@@ -1,0 +1,83 @@
+# Builds a Chronexa debug APK on GitHub's free Linux runners, so no PC is needed.
+#
+# Put ONE file in the root of your repository: chronexa-source.zip (the project zip).
+# This workflow unpacks it, runs the unit tests, builds the APK and offers it for download
+# under Actions -> the run -> Artifacts.
+name: Build Chronexa APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-chronexa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Unit tests and debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Unpack the project zip
+        run: |
+          set -euo pipefail
+          test -f chronexa-source.zip || { echo "chronexa-source.zip is missing from the repository root"; exit 1; }
+          mkdir -p unpacked
+          unzip -q chronexa-source.zip -d unpacked
+          # Accept the zip with files at its root or inside one folder.
+          ROOT="$(dirname "$(find unpacked -name settings.gradle.kts | head -n 1)")"
+          test -n "$ROOT" && test -f "$ROOT/settings.gradle.kts" || { echo "No settings.gradle.kts found in the zip"; exit 1; }
+          mv "$ROOT" project
+          chmod +x project/gradlew
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Make sure Android platform 37 is installed
+        run: |
+          set +e
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ -x "$SDKMANAGER" ]; then
+            yes | "$SDKMANAGER" --licenses > /dev/null 2>&1
+            "$SDKMANAGER" "platforms;android-37" > /dev/null 2>&1
+          fi
+          # Not fatal: Gradle installs missing SDK packages itself if this step could not.
+          exit 0
+
+      - name: Unit tests and debug build
+        working-directory: project
+        run: ./gradlew --no-daemon testDebugUnitTest assembleDebug
+
+      - name: Upload the APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: chronexa-debug-apk
+          path: project/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload test reports if something failed
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-reports
+          path: |
+            project/app/build/reports/tests/
+            project/app/build/test-results/
+          if-no-files-found: ignore
+          retention-days: 7
